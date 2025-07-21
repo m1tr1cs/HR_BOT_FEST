@@ -10,6 +10,7 @@ dp = Dispatcher(storage=MemoryStorage())
 dp.include_router(user_router)
 dp.include_router(jobs_router)
 
+
 if __name__ == "__main__":
     import asyncio
     from utils.sheets import load_vacancies_from_sheet

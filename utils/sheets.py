@@ -42,7 +42,7 @@ def save_candidate(name, phone, age, chat_id, vacancy_details):
         if str(chat_id) in chat_ids:
             repeat_note = " (повторне звернення)"
 
-        job_description = f"{vacancy_details.get('position')} - {vacancy_details.get('Назва закладу')} ({vacancy_details.get('Адреса')})"
+        job_description = f"{vacancy_details.get('position')} - {vacancy_details.get('market')} ({vacancy_details.get('location')})"
         date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         sheet.append_row([name + repeat_note, age, job_description, phone, date, str(chat_id)])
