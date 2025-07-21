@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 from os import getenv
 
-load_dotenv("D:/Bot_Telegram/HR_BOT_1/api.env")
+load_dotenv("api.env")
 
 BOT_TOKEN = getenv("BOT_TOKEN")
 
