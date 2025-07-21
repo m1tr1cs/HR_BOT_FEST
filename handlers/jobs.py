@@ -129,6 +129,7 @@ async def process_back_to_interest(callback: CallbackQuery, state: FSMContext):
         "🔎 Чудово! Обери, що тебе цікавить:",
         reply_markup=interest_inline_keyboard()
     )
+    #await state.clear()
     await state.set_state(Form.choosing_interest)
     await callback.answer()
 
@@ -151,7 +152,7 @@ async def process_vacancy_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer("✅ Твій відгук успішно надіслано!", show_alert=False)
     await callback.message.answer(f"🎉 **Дякуємо! Ваш відгук на цю вакансію надіслано.**\n\n{callback.message.text}",
                                      parse_mode="Markdown", reply_markup=None)
-    await state.clear()
+    await state.update_data(vacancies=None)
     #await callback.message.answer("Якщо захочеш переглянути інші вакансії або почати знову, просто напиши /start.",
     #                              reply_markup=ReplyKeyboardRemove())
     main_menu_kb = InlineKeyboardMarkup(
