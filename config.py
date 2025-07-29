@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 from os import getenv
 
-load_dotenv("api.env")
+load_dotenv("api_test.env")
 
 BOT_TOKEN = getenv("BOT_TOKEN")
 
