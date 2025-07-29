@@ -14,7 +14,7 @@ def phone_keyboard():
 def main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="back_to_interest")],
-        [InlineKeyboardButton(text="📝 Редагувати дані", callback_data="edit_user_data")]
+        [InlineKeyboardButton(text="📝 Редагувати профіль", callback_data="edit_user_data")]
     ])
 
 
@@ -48,7 +48,7 @@ def interest_inline_keyboard(show_edit_button=False, show_feedback_button=False,
         ]
     ]
     if show_edit_button:
-        buttons.append([InlineKeyboardButton(text="📝 Редагувати дані", callback_data="edit_user_data")])
+        buttons.append([InlineKeyboardButton(text="📝 Редагувати профіль", callback_data="edit_user_data")])
     if show_feedback_button:
         buttons.append([InlineKeyboardButton(text="📄 Мої відгуки", callback_data="view_feedback")])
     if show_admin_button:
@@ -84,6 +84,8 @@ def admin_panel_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Редагувати «Про нас»", callback_data="admin_edit_about")],
         [InlineKeyboardButton(text="🗂 Редагувати вакансії", callback_data="admin_edit_vacancies")],
+        # [InlineKeyboardButton(text="📋 Всі вакансії", callback_data="admin_all_vacancies")],  # ← тут
         [InlineKeyboardButton(text="📄 Всі відгуки", callback_data="admin_view_feedbacks")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_interest")]
     ])
+

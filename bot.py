@@ -13,12 +13,14 @@ dp.include_router(jobs_router)
 
 if __name__ == "__main__":
     import asyncio
+
+
     async def main():
         init_db()
         await dp.start_polling(bot)
+
 
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
-

@@ -7,7 +7,9 @@ import logging
 import re
 from keyboards import interest_inline_keyboard, phone_keyboard, cancel_keyboard, back_to_interest_keyboard, \
     admin_panel_keyboard
-from utils.db import get_candidate_by_chat_id, is_admin
+from utils.db import  is_admin, get_chat_id_by_phone, remove_admin, get_user_profile
+from aiogram.filters import Command
+from utils.db import set_admin
 
 user_router = Router()
 
@@ -19,7 +21,10 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
 
     chat_id = message.from_user.id
-    user_data = get_candidate_by_chat_id(chat_id)
+    user_data = get_user_profile(chat_id)  # <--- замість get_candidate_by_chat_id
+
+    if user_data:
+        await state.update_data(**user_data)
 
     if user_data:
         await state.update_data(**user_data)
@@ -103,18 +108,27 @@ async def process_phone_text(message: Message, state: FSMContext):
     await state.set_state(Form.waiting_for_age)
 
 
-@user_router.message(Form.waiting_for_age)
-async def process_age(message: Message, state: FSMContext):
-    if not message.text or not message.text.isdigit():
-        await message.answer("📅 Введи свій вік (лише цифри, наприклад: 25):")
+@user_router.message(Form.waiting_for_resume)
+async def process_resume(message: Message, state: FSMContext):
+    data = await state.get_data()
+    resume_link = None
+
+    if message.document:
+        resume_link = message.document.file_id
+    elif message.text and (message.text.startswith("http://") or message.text.startswith("https://")):
+        resume_link = message.text.strip()
+    elif message.text and message.text.lower() == "пропустити":
+        resume_link = data.get("resume_link")
+    else:
+        await message.answer("Будь ласка, надішли файл (pdf/docx) або лінк (Google Drive/Docs), або напиши 'Пропустити'.")
         return
-    age = int(message.text)
-    if not 16 <= age <= 55:
-        await message.answer("Нажаль, ми розглядаємо кандидатів віком від 16 до 55 років.")
-        return
-    await state.update_data(age=str(age))
-    # await message.answer("🔎 Чудово! Тепер обери, що тебе цікавить:", reply_markup=interest_keyboard()) #звичайна клавіатура
-    # new keyboard inline (Робота, Про нас)
+
+    await state.update_data(resume_link=resume_link)
+
+    # !!! ЗБЕРІГАЄМО В USERS:
+    from utils.db import update_resume_link
+    update_resume_link(message.from_user.id, resume_link)
+
     await message.answer(
         "🔎 Чудово! Обери, що тебе цікавить:",
         reply_markup=interest_inline_keyboard()
@@ -122,17 +136,66 @@ async def process_age(message: Message, state: FSMContext):
     await state.set_state(Form.choosing_interest)
 
 
+
+# @user_router.message(Form.waiting_for_age)
+# async def process_age(message: Message, state: FSMContext):
+#     if not message.text or not message.text.isdigit():
+#         await message.answer("📅 Введи свій вік (лише цифри, наприклад: 25):")
+#         return
+#     age = int(message.text)
+#     if not 16 <= age <= 55:
+#         await message.answer("Нажаль, ми розглядаємо кандидатів віком від 16 до 55 років.")
+#         return
+#     await state.update_data(age=str(age))
+#     # *** Додаємо новий етап ***
+#     await message.answer(
+#         "🔗 Надішли файл резюме (pdf, docx) або посилання на Google Drive/Docs:",
+#         reply_markup=ReplyKeyboardRemove()
+#     )
+#     await state.set_state(Form.waiting_for_resume)
+#
+#
+# from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
 @user_router.callback_query(F.data == "edit_user_data")
 async def edit_user_data(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    await callback.message.answer(f"""Твої поточні дані:
+    resume_link = data.get("resume_link")
+    resume_text = ""
+    buttons = [[InlineKeyboardButton(text="❌ Скасувати", callback_data="back_to_interest")]]
+
+    # Якщо прикріплений файл резюме — додати кнопку для перегляду
+    if resume_link:
+        if resume_link.startswith("BQAC"):
+            resume_text = "\n📄 Поточний файл резюме прикріплений."
+            buttons.insert(0,
+                           [InlineKeyboardButton(text="👁 Переглянути файл резюме", callback_data="view_resume_file")])
+        else:
+            resume_text = f"\n🔗 Поточне резюме: {resume_link}"
+
+    await callback.message.answer(
+        f"""Твої поточні дані:
 👤 Ім'я: {data.get('name')}
 📱 Телефон: {data.get('phone')}
 🎂 Вік: {data.get('age')}
+{resume_text}
 
 ✏️ Введи нове ім’я (або натисни “❌ Скасувати”):""",
-                                  reply_markup=cancel_keyboard())
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
     await state.set_state(Form.waiting_for_name)
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "view_resume_file")
+async def view_resume_file(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    resume_link = data.get("resume_link")
+    if resume_link and resume_link.startswith("BQAC"):
+        await callback.message.answer_document(resume_link)
+    else:
+        await callback.message.answer("Файл не знайдено.")
     await callback.answer()
 
 
@@ -142,19 +205,21 @@ async def process_interest_inline(callback: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     show_edit = all(data.get(k) for k in ["name", "phone", "age"])
+    show_feedback = True
 
     if text == "interest_about":
         from utils.db import get_setting
         about_text = get_setting("about_text") or "🤷‍♀️ Розділ «Про нас» ще не заповнений."
         is_admin_user = is_admin(callback.from_user.id)
 
+        # Генеруємо власну клаву з кнопкою Назад
+        buttons = [
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_interest")]
+        ]
+
         await callback.message.answer(
             about_text,
-            reply_markup=interest_inline_keyboard(
-                show_edit_button=show_edit,
-                show_feedback_button=True,
-                show_admin_button=is_admin_user
-            )
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
         )
         await callback.answer()
         return
@@ -202,7 +267,7 @@ async def view_user_feedback(callback: CallbackQuery, state: FSMContext):
             ]])
         )
     await callback.message.answer("⬅️ Повернутись назад:",
-                                  reply_markup=back_to_interest_keyboard(show_edit=True, show_feedback=True))
+                                  reply_markup=back_to_interest_keyboard(show_edit=False, show_feedback=True))
 
 
 @user_router.callback_query(F.data.startswith("cancel_feedback_"))
@@ -213,18 +278,73 @@ async def cancel_feedback(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("✅ Відгук успішно скасовано.")
     await callback.answer()
 
-    @user_router.callback_query(F.data == "back_to_interest")
-    async def process_back_to_interest(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        show_edit = all(data.get(k) for k in ["name", "phone", "age"])
+    # ID розробника, хто має право призначати адмінів
 
-        await callback.message.answer(
-            "🔎 Обери, що тебе цікавить:",
-            reply_markup=interest_inline_keyboard(show_edit_button=show_edit, show_feedback_button=True)
-        )
-        await state.set_state(Form.choosing_interest)
-        await callback.answer()
 
+DEVELOPER_ID = 494176019  # 🔁 заміни на свій Telegram ID
+
+
+@user_router.message(Command("makeadmin"))
+async def handle_makeadmin_command(message: Message):
+    # Перевірка, чи ти сам адмін
+    from utils.db import is_admin
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔️ У вас немає прав доступу до цієї команди.")
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        await message.answer("❗ Використання: /makeadmin +380XXXXXXXXX")
+        return
+
+    phone = parts[1]
+    chat_id = get_chat_id_by_phone(phone)
+    if not chat_id:
+        await message.answer("😔 Користувача з таким номером не знайдено в базі.")
+        return
+
+    set_admin(chat_id)
+    await message.answer(f"✅ Користувача з номером {phone} призначено адміністратором.")
+
+
+@user_router.message(Command("removeadmin"))
+async def handle_removeadmin_command(message: Message):
+    from utils.db import is_admin
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔️ У вас немає прав доступу до цієї команди.")
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        await message.answer("❗ Використання: /removeadmin +380XXXXXXXXX")
+        return
+
+    phone = parts[1]
+    chat_id = get_chat_id_by_phone(phone)
+    if not chat_id:
+        await message.answer("😔 Користувача з таким номером не знайдено в базі.")
+        return
+
+    remove_admin(chat_id)
+    await message.answer(f"✅ Роль адміністратора з номера {phone} успішно знято.")
+
+
+# @user_router.message(Command("makeadmin"))
+
+
+# async def make_admin_command(message: Message):
+#     if message.from_user.id != DEVELOPER_ID:
+#         await message.answer("❌ У вас немає прав для цієї команди.")
+#         return
+#
+#     parts = message.text.split()
+#     if len(parts) != 2 or not parts[1].isdigit():
+#         await message.answer("🔧 Використання: /makeadmin <chat_id>")
+#         return
+#
+#     chat_id = parts[1]
+#     set_admin(chat_id)
+#     await message.answer(f"✅ Користувач {chat_id} тепер адміністратор.")
 
 @user_router.callback_query(F.data == "admin_panel")
 async def admin_panel(callback: CallbackQuery, state: FSMContext):
@@ -264,8 +384,28 @@ async def admin_view_feedbacks(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    for fb in feedbacks:
-        fid, name, phone, age, chat_id, job, created, checked = fb
+    await state.update_data(feedbacks=feedbacks, feedback_page=0)
+    await show_feedback_page(callback.message, state)
+    await state.set_state(Form.admin_feedback_page)
+    await callback.answer()
+
+
+async def show_feedback_page(message: Message, state: FSMContext):
+    data = await state.get_data()
+    feedbacks = data.get("feedbacks", [])
+    page = data.get("feedback_page", 0)
+    per_page = 5
+
+    start = page * per_page
+    end = start + per_page
+    page_feedbacks = feedbacks[start:end]
+
+    if not page_feedbacks:
+        await message.answer("📭 Більше відгуків немає.")
+        return
+
+    for fb in page_feedbacks:
+        fid, name, phone, age, chat_id, job, created, checked, resume_link = fb
         status = "✅ Опрацьовано" if checked else "🕓 Не опрацьовано"
 
         msg = (
@@ -278,12 +418,54 @@ async def admin_view_feedbacks(callback: CallbackQuery, state: FSMContext):
         )
 
         buttons = []
+        # ОНОВЛЕНО: кнопка на відкриття файлу через callback, а не url
+        if resume_link:
+            if resume_link.startswith('BQAC'):
+                buttons.append(InlineKeyboardButton(
+                    text="📄 Відкрити файл",
+                    callback_data=f"admin_open_resume_{fid}"
+                ))
+            else:
+                msg += f"\n🔗 Резюме: {resume_link}"
+
         if not checked:
-            buttons.append(InlineKeyboardButton(text="✅ Позначити як опрацьовано", callback_data=f"mark_checked_{fid}"))
+            buttons.append(InlineKeyboardButton(text="✅ Опрацювати", callback_data=f"mark_checked_{fid}"))
         buttons.append(InlineKeyboardButton(text="❌ Видалити", callback_data=f"admin_delete_feedback_{fid}"))
 
-        await callback.message.answer(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]))
+        await message.answer(msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]))
 
+    # Навігація
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="feedback_prev"))
+    if end < len(feedbacks):
+        nav_buttons.append(InlineKeyboardButton(text="➡️ Далі", callback_data="feedback_next"))
+
+    if nav_buttons:
+        await message.answer("📄 Навігація по відгуках:",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[nav_buttons]))
+
+    # Додаємо кнопку Назад
+    await message.answer(
+        "⬅️ Повернутись в HR-панель:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin")]
+        ])
+    )
+
+
+@user_router.callback_query(F.data.in_(["feedback_next", "feedback_prev"]), Form.admin_feedback_page)
+async def paginate_feedback(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    page = data.get("feedback_page", 0)
+
+    if callback.data == "feedback_next":
+        page += 1
+    elif callback.data == "feedback_prev":
+        page = max(0, page - 1)
+
+    await state.update_data(feedback_page=page)
+    await show_feedback_page(callback.message, state)
     await callback.answer()
 
 
@@ -358,17 +540,24 @@ async def admin_choose_vacancy(callback: CallbackQuery, state: FSMContext):
 
     for v in vacancies:
         vid, position, location, age_range, description = v
-        text = f"📌 {position}\n📍 {location}\n👥 {age_range}\n📝 {description or '—'}"
+        text = f"📌 {position}\n📍 {location}\n📝 {description or '—'}"
+        await callback.message.answer(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"edit_vacancy_{vid}")],
+                [InlineKeyboardButton(text="❌ Видалити", callback_data=f"delete_vacancy_{vid}")],
+                [InlineKeyboardButton(text="🙈 Приховати", callback_data=f"hide_vacancy_{vid}")]
+            ])
+        )
 
-        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"edit_vacancy_{vid}")],
-            [InlineKeyboardButton(text="❌ Видалити", callback_data=f"delete_vacancy_{vid}")]
-        ]))
+    await callback.message.answer(
+        "➕ Додати нову вакансію:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Додати вакансію", callback_data="add_vacancy")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_edit_vacancies")]
+        ])
+    )
 
-    await callback.message.answer("⬅️ Повернутись назад:",
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                      [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_edit_vacancies")]
-                                  ]))
     await callback.answer()
 
 
@@ -386,27 +575,158 @@ async def admin_start_edit_vacancy(callback: CallbackQuery, state: FSMContext):
     vacancy_id = int(callback.data.split("_")[-1])
     await state.update_data(editing_vacancy_id=vacancy_id)
 
+    # Витягуємо поточні дані з БД:
+    from utils.db import get_vacancies_by_id
+    vacancy = get_vacancies_by_id(vacancy_id)  # зроби таку функцію у db.py!
+
+    if vacancy:
+        position, market, city, location, age_range, description = vacancy
+        await callback.message.answer(
+            f"Поточна вакансія:\n\n"
+            f"Позиція: {position}\n"
+            f"Заклад: {market}\n"
+            f"Місто: {city}\n"
+            f"Адреса: {location}\n"
+            f"Вік: {age_range}\n"
+            f"Опис: {description}"
+        )
+
     await callback.message.answer(
         "✏️ Надішліть новий опис вакансії у форматі:\n\n"
-        "Позиція | Заклад | Місто | Адреса | Вік | Опис"
+        "Позиція\nЗаклад\nМісто\nАдреса\nВік\nОпис\n\n"
+        "(кожне поле — окремий рядок)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_edit_vacancy")]
+        ])
     )
+
     await state.set_state(Form.editing_vacancy)
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "cancel_edit_vacancy")
+async def cancel_edit_vacancy(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("✏️ Редагування вакансії скасовано.")
+    await callback.message.answer(
+        "⬅️ Повернутись назад:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_edit_vacancies")]
+        ])
+    )
+    await state.set_state(Form.choosing_interest)
+    await callback.answer()
+
+
+@user_router.callback_query(F.data.startswith("hide_vacancy_"))
+async def admin_hide_vacancy(callback: CallbackQuery, state: FSMContext):
+    vacancy_id = int(callback.data.split("_")[-1])
+    from utils.db import hide_vacancy
+    hide_vacancy(vacancy_id)
+    await callback.message.edit_text("🙈 Вакансію приховано.")
     await callback.answer()
 
 
 @user_router.message(Form.editing_vacancy)
 async def save_edited_vacancy(message: Message, state: FSMContext):
-    parts = [p.strip() for p in message.text.split("|")]
+    parts = [p.strip() for p in message.text.strip().split("\n") if p.strip()]
     if len(parts) < 6:
-        await message.answer("⚠️ Формат неправильний. Має бути:\nПозиція | Заклад | Місто | Адреса | Вік | Опис")
+        await message.answer(
+            "⚠️ Формат неправильний. Має бути 6 рядків:\nПозиція\nЗаклад\nМісто\nАдреса\nВік\nОпис"
+        )
         return
 
     position, market, city, location, age_range, description = parts[:6]
     data = await state.get_data()
     vacancy_id = data.get("editing_vacancy_id")
 
-    from utils.db import update_vacancy
-    update_vacancy(vacancy_id, position, market, city, location, age_range, description)
+    if vacancy_id:  # редагування
+        from utils.db import update_vacancy
+        update_vacancy(vacancy_id, position, market, city, location, age_range, description)
+        await message.answer("✅ Вакансію оновлено.")
+    else:  # додавання
+        from utils.db import add_vacancy
+        add_vacancy(position, market, city, location, age_range, description)
+        await message.answer(
+            "✅ Нову вакансію додано.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_edit_vacancies")]
+            ])
+        )
+        await state.set_state(Form.choosing_interest)
 
-    await message.answer("✅ Вакансію оновлено.")
+
+@user_router.callback_query(F.data == "back_to_admin")
+async def back_to_admin(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("🛠 HR-панель — оберіть дію:", reply_markup=admin_panel_keyboard())
     await state.set_state(Form.choosing_interest)
+    await callback.answer()
+
+
+@user_router.message(Form.waiting_for_age)
+async def process_age(message: Message, state: FSMContext):
+    if not message.text or not message.text.isdigit():
+        await message.answer("📅 Введи свій вік (лише цифри, наприклад: 25):")
+        return
+    age = int(message.text)
+    if not 16 <= age <= 55:
+        await message.answer("Нажаль, ми розглядаємо кандидатів віком від 16 до 55 років.")
+        return
+    await state.update_data(age=str(age))
+
+    # Витягуємо поточне резюме з state
+    data = await state.get_data()
+    resume_link = data.get("resume_link")
+    msg = "🔗 Надішли файл резюме (pdf, docx) або посилання на Google Drive/Docs.\nЯкщо не хочеш змінювати — напиши 'Пропустити'."
+    if resume_link:
+        if resume_link.startswith("BQAC"):
+            msg += "\n📄 Поточний файл резюме вже прикріплений."
+        else:
+            msg += f"\n🔗 Поточне резюме: {resume_link}"
+
+    await message.answer(
+        msg,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Скасувати", callback_data="back_to_interest")]]
+        )
+    )
+    await state.set_state(Form.waiting_for_resume)
+
+
+@user_router.callback_query(F.data.startswith("admin_open_resume_"))
+async def admin_open_resume(callback: CallbackQuery, state: FSMContext):
+    fid = int(callback.data.split("_")[-1])
+    from utils.db import get_all_feedbacks
+    feedbacks = get_all_feedbacks()
+    resume_link = None
+    for fb in feedbacks:
+        if fb[0] == fid:
+            resume_link = fb[-1]  # resume_link має бути останній у tuple
+            break
+
+    if resume_link and resume_link.startswith("BQAC"):
+        await callback.message.answer_document(resume_link)
+    elif resume_link:
+        await callback.message.answer(f"🔗 Резюме: {resume_link}")
+    else:
+        await callback.message.answer("❗️ Файл резюме не знайдено або він не файл Telegram.")
+
+    await callback.answer()
+
+
+@user_router.callback_query(F.data.startswith("admin_delete_feedback_"))
+async def admin_delete_feedback(callback: CallbackQuery, state: FSMContext):
+    record_id = int(callback.data.split("_")[-1])
+    from utils.db import delete_feedback
+    delete_feedback(record_id)
+    await callback.message.edit_text("🗑 Відгук успішно видалено.")
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "add_vacancy")
+async def admin_add_vacancy(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "Введіть нову вакансію у форматі:\n\nПозиція | Заклад | Місто | Адреса | Вік | Опис"
+    )
+    await state.set_state(Form.editing_vacancy)
+    await state.update_data(editing_vacancy_id=None)  # None, бо це нова вакансія
+    await callback.answer()
